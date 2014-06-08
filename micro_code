@@ -1,0 +1,331 @@
+//#include "support_common.h" /* include peripheral declarations and more */
+#if (CONSOLE_IO_SUPPORT || ENABLE_UART_SUPPORT)
+/* Standard IO is only possible if Console or UART support is enabled. */
+#include <stdio.h>
+#endif
+/*
+=======================================================================
+* File: main.c.
+* Purpose: Using PIT0 timer to measure the frequency of a square wave
+signal.
+* Notes: The timer is configured in the free-running operation mode.
+The square wave is to be connected to IRQ1 (pin 33 of the
+M52233DEMO board I/O connector). The interrupt handler for
+IRQ1 measures the number of timer pulses within the square
+wave period, calculates the period and the frequency of the
+square wave, and sends them to the console screen. The
+timers overflow interrupt handler increases the number of
+timer pulses by 0xFFFF.
+=======================================================================
+*/
+#include <stdio.h>
+#include "common.h"
+#define MCF_INTC_IMRH_INT_MASK55 (0x800000)
+#define MCF_INTC_IMRL_INT_MASK1 (0x2)
+#define MCF_INTC_IMRL_INT_MASK7 (0x80)
+#define MCF_EPORT0_EPFR (*(volatile unsigned char *)(&__IPSBAR[0x130006]))
+#define FREQ_HZ 12500000
+#define H char 'H'
+uint32 timer_pulses = 0;
+uint16 previous;
+uint16 current;
+uint32 period, frequency;
+__interrupt__ void PIT0_handler ();
+__interrupt__ void IRQ1_handler ();
+__interrupt__ void IRQ7_handler ();
+
+/*
+=======================================================================
+* Timer Initialization Function
+  Initializes Timer to Free-Running Mode, Overflow, etc. Will generate Interrupt when timer reaches
+  and roll over to 0. Used for the Frequency Calculations
+=======================================================================
+*/
+void PIT0_Init(void)
+{
+mcf5xxx_irq_disable(); // Masks all Interrupts
+
+MCF_INTC0_IMRH &=~ MCF_INTC_IMRH_INT_MASK55; //Re-Unmask the PIT interrupt
+
+MCF_INTC0_ICR55 |= 0x12; //Level 2 Piority. (Lower than SW1)
+
+mcf5xxx_set_handler(64+55,(uint32) &PIT0_handler); // Set the location of the 
+
+//overflow ISR
+MCF_PIT0_PCSR = 0x18;
+
+
+MCF_PIT0_PMR = 0xffff; //start count value at max
+
+mcf5xxx_irq_enable(); // Allow interrupts
+}
+
+/*
+=======================================================================
+* Interrupt Controller Initialization Function
+*For Timer Interrupt and Switch interrupt
+=======================================================================
+*/
+void IRQ1_Init(void)
+{
+// Initialize the Timer edge port and its piority
+
+
+mcf5xxx_irq_disable(); //Disable dem interrupts
+
+MCF_INTC0_IMRL &=~ (MCF_INTC_IMRL_INT_MASK1|0x1); //Allow IRQ1
+
+MCF_INTC0_ICR1 |= 0x1B; //Level 3 piority.  
+
+MCF_EPORT_EPIER0 = 0x02; //Edge port 1
+
+MCF_EPORT_EPDDR0 = 0X0; //Set as Input
+
+MCF_EPORT_EPPAR0 = 0x04; //Edge port 1 is rising edge sensitive
+
+mcf5xxx_set_handler(64+1,(UINT32) &IRQ1_handler); //ISR location
+
+mcf5xxx_irq_enable(); //re-enable the interrupts
+}
+/*
+=======================================================================
+* Timer Overflow Interrupt Handler
+=======================================================================
+*/
+__interrupt__ void PIT0_handler ()
+{
+
+//Genreated when timer reaches 0
+//Save timer and continue (+=0xfff)
+
+timer_pulses += 0xffff; // Increment Overflow Counter by 0xFFFF
+MCF_PIT0_PCSR = 0x1;
+// Clear the Overflow 
+}
+/*
+=======================================================================
+* IRQ1 Handler
+=======================================================================
+*/
+__interrupt__ void IRQ1_handler ()
+{
+//Generated on each rising edge of the input square-wave
+//Stops timer on every second rising edge
+// re-enables timer on the others
+//prints our frequency calculations and such
+
+int count;
+
+int delay;
+
+mcf5xxx_irq_disable(); 
+
+if(MCF_PIT0_PCSR & 0x0001) // check if timer is disabled (second edge)
+{ 
+count = 0xffff-MCF_PIT0_PCNTR; // temporary variable
+
+MCF_PIT0_PCSR &=~MCF_PIT_PCSR_EN; // Disable Counter
+
+timer_pulses += count; // Calculate Total Pulses
+
+MCF_PIT0_PMR = 0xffff; // Reset the counter
+
+for(delay=1000000;delay>0;delay--){} // Delay to prevent overflow of buffer
+/* printf statements are together to prevent lost time, values are all printed at the same time */
+printf("Frequency = %d Hz\n\r",(FREQ_HZ/timer_pulses)); // Calc & Display
+//Frequency
+
+printf("Resistance: %d ohms\n",(5000*(MCF_ADC_ADRSLT0/8)/0xfff)); // Calc & Display Resistance
+
+printf("Sawtooth frequency: %d Hz\n",(FREQ_HZ/(16*16*(0xff&MCF_QSPI_QMR)+160)));
+//extract baud rate from QMR register
+//account for 16 transfers of 16 bits
+
+
+} else // 1st Edge
+{
+MCF_PIT0_PCSR |=MCF_PIT_PCSR_EN; // Start Timer
+timer_pulses =0; // Reset the Overflow Counter
+}
+MCF_EPORT0_EPFR = 0xff; // Clear Interrupt Flags
+mcf5xxx_irq_enable(); // Un-Mask All IRQs
+}
+
+/*
+======================================================================
+IRQ 7 INIT
+======================================================================
+*/
+
+void IRQ7_Init(void)
+{
+//This function is for the button press
+//Enables the button SW1 and sets up the inputs as necessary
+
+
+mcf5xxx_irq_disable(); 
+
+MCF_INTC0_IMRL &=~ (MCF_INTC_IMRL_INT_MASK7|0x1); // Unmask (IRQ1) interrupt
+
+MCF_INTC0_ICR7 = 0x2D; //Switch has highest priority at 5
+
+MCF_EPORT_EPIER0 |= 0x80;  // Pin 7 on edge port
+
+MCF_EPORT_EPDDR0 = 0x0; // set as input
+
+MCF_EPORT_EPPAR0 |= 0x4000; // responds to rising edges
+
+mcf5xxx_set_handler(64+7,(uint32) &IRQ7_handler); // locating ISR
+
+mcf5xxx_irq_enable(); 
+}
+
+/*
+=======================================================================
+* IRQ7 Handler
+=======================================================================
+*/
+__interrupt__ void IRQ7_handler ()
+{
+mcf5xxx_irq_disable();
+//Activated when switch is pressed
+//The Baud rate (Transfer rate) of the QSPI is based on the ADC
+//Load the 12-bit value from the ADC into the QSPI_Init
+//This will be out new BAUD rate or sawtooth frequency
+//The value is 16 bits initially. We are extracting the necessary 12bits. 
+MCF_QSPI_QMR = 0x8002 + (253*MCF_ADC_ADRSLT1/8/0xfff);
+
+//Selecting AN1 from the sample in the ADC
+//want bits 4-6 of a 16 bit number
+//loading value into QSPI setting register
+//baud rate will be the Sample
+//trying to load value while keeping the settings the same
+
+ 
+MCF_EPORT0_EPFR = 0xff; //Clear edge port Flag
+
+mcf5xxx_irq_enable();
+}
+/*
+=======================================================================
+* ADC Initialization
+=======================================================================
+*/
+void ADC_init()
+{
+//The ADC needs to recieve data on AN0 and AN1 from two seperate resistors
+//disable zero-crossing mode and other unnesscary modes
+//The voltages can be anywhere between 0 and 3.3V
+//Will be read from whenever the button is pressed.
+//Button pressed -> Voltage read and loaded into QSPI
+
+int n=0;
+MCF_GPIO_PANPAR = 0xFF; //sets port AN to primary function (ADC)
+
+MCF_ADC_POWER = 0xD4; //power mode to no sleep
+
+MCF_ADC_CTRL1 = 0x2; //loop sequential mode (disable everything else)
+
+MCF_ADC_CTRL2 = 0x5; //set divisor 25Mhz/2(divisor+1)
+
+MCF_ADC_ADZCC = 0; //zero crossing disabled
+
+MCF_ADC_ADLST1 = 0x3210; //Input A to Sample
+
+MCF_ADC_ADLST2 = 0x7654; //Input B to sample
+
+MCF_ADC_ADSDIS = 0x0004; // Only enable AN0 and AN1
+
+MCF_ADC_ADLLMT0 = 0; 
+
+MCF_ADC_ADLLMT1 = 0; //setting upper and lower limits of each input
+
+MCF_ADC_ADHLMT0 = 0x7FF8; //(AN0 and AN1 to 0 and its maximum value)
+
+MCF_ADC_ADHLMT1 = 0x7FF8; //3.3 V
+
+MCF_ADC_ADOFS0 = 0; //0 offset
+
+MCF_ADC_ADOFS1 = 0; 
+
+MCF_ADC_CAL = 0; //used Vref low and Vref high
+
+for(n=0;n<1000;n++){} //If the clock Freq is high a delay is necessary (Boot up time for ADC?)
+
+MCF_ADC_CTRL1 = 0x2002; //ADC ON
+}
+/*
+=======================================================================
+* QSPI Initialization Function
+=======================================================================
+*/
+void QSPI_Init(void)
+{
+//QSPI will Generate our initial sawtooth signal
+//QSPI will receive the change from the switch
+int i=0 ;
+//the baud rate will define the sawtooth signal
+//baud rate with be defined by the voltage read from the resistor
+
+MCF_QSPI_QMR = 0x80FF;
+
+MCF_QSPI_QDLYR = 0x0404; //set delay to 0x4 before and after
+
+MCF_QSPI_QWR = 0x5F00; // wrap enabled, wrap to zero, chip select active low
+
+MCF_QSPI_QIR = 0; //Disable the the interrupts
+
+MCF_GPIO_PQSPAR = 0x5555; // Assigning pins to the QSPI
+
+MCF_GPIO_DDRQS=0xFFFF; // Setting the pins to the QSPI as outputs
+//outputs are important as QPSI will send data
+
+//RAM loading code
+for(i=0; i<16;i++)
+{
+//sends data to nessary sections of RAM
+//16 bit number transfers
+//16 time loop (1 - bit per transfer)
+MCF_QSPI_QAR = i; 
+//address register
+MCF_QSPI_QDR=0x7000+i*(0x111); 
+//data register
+MCF_QSPI_QAR = 0x20+i; 
+//address register
+MCF_QSPI_QDR=0x4800; 
+//data register
+}
+MCF_QSPI_QMR = 0x80FF; //baud rate set to slowest value
+
+MCF_QSPI_QDLYR = 0x8808; //delays
+}
+
+
+/*
+=======================================================================
+* Main Function
+=======================================================================
+*/
+int main()
+{
+int i;
+IRQ1_Init(); //Call Initialization Functions
+IRQ7_Init(); //
+PIT0_Init(); //
+ADC_init(); // Initialize ADC
+QSPI_Init(); //
+while(1) //Inf Loop
+{
+//print statements in case frequency generator is off
+//will continue to print when not being interrupted
+for (i=0;i<FREQ_HZ/7;i++)
+{
+//delay so no divide by zero in print statements
+}
+printf("Frequency = %d Hz\n\r",(int)(FREQ_HZ/timer_pulses));
+printf("Resistance: %d ohms\n",(5000*(MCF_ADC_ADRSLT0/8)/0xfff));
+printf("Sawtooth frequency: %d Hz\n",(FREQ_HZ/(256*(0xff&MCF_QSPI_QMR)+160)));
+
+}
+return 0;
+}
